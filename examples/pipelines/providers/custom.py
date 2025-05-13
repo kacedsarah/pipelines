@@ -1,29 +1,36 @@
 """
-title: Custom Billing Assistant
+title: Claude 3 - 5G Billing Assistant
 author: you
 date: 2025-05-13
 version: 1.0
 license: MIT
-description: A custom assistant focused on 5G billing support.
+description: A Claude-based assistant for 5G billing inquiries using the Anthropic API.
+requirements: requests
+environment_variables: ANTHROPIC_API_KEY
 """
 
+import os
+import requests
 import logging
-from typing import List, Union, Generator, Iterator, Dict, Optional, Any
+from typing import List, Union, Dict, Optional, Generator, Iterator
 from pydantic import BaseModel
 from utils.pipelines.main import pop_system_message
 
 
 class Pipeline:
     class Valves(BaseModel):
-        pass
+        ANTHROPIC_API_KEY: Optional[str] = None
 
     def __init__(self):
         self.type = "manifold"
-        self.name = "Billing Assistant"
-        self.valves = self.Valves()
+        self.name = "Claude 5G Billing Assistant"
+        self.valves = self.Valves(
+            ANTHROPIC_API_KEY=os.getenv("ANTHROPIC_API_KEY", "")
+        )
+        self.model_id = "claude-3-sonnet-20240229"  # or claude-3-opus-20240229
+
         self.pipelines = self.get_models()
 
-        # System prompt for this assistant
         self.system_prompt = (
             "You are a professional customer service assistant for a 5G mobile network provider. "
             "Your role is to assist customers with billing-related inquiries such as data charges, "
@@ -40,63 +47,64 @@ class Pipeline:
             "Stay strictly in the assistant role and stick to 5G billing-related concerns."
         )
 
-    async def on_startup(self):
-        pass
-
-    async def on_shutdown(self):
-        pass
-
-    async def on_valves_updated(self):
-        pass
-
     def get_models(self):
-        return [
-            {
-                "id": "custom-billing-assistant-v1",
-                "name": "5G Billing Assistant",
-            },
-        ]
+        return [{
+            "id": "claude-5g-billing-assistant",
+            "name": "Claude 5G Billing Assistant",
+        }]
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Union[str, Generator, Iterator]:
+    ) -> Union[str, Dict[str, Union[str, list]]]:
+
+        api_key = self.valves.ANTHROPIC_API_KEY
+        if not api_key:
+            return {"error": "Missing ANTHROPIC_API_KEY"}
+
+        # Remove irrelevant keys
+        for key in ['user', 'chat_id', 'title']:
+            body.pop(key, None)
+
+        # Inject system message
+        system_message, messages = pop_system_message(messages)
+        system_message_content = self.system_prompt
+
+        claude_messages = [{"role": "user", "content": system_message_content}]
+        claude_messages += messages
+
+        payload = {
+            "model": self.model_id,
+            "max_tokens": body.get("max_tokens", 1024),
+            "temperature": body.get("temperature", 0.7),
+            "top_p": body.get("top_p", 0.9),
+            "messages": claude_messages,
+            "system": system_message_content,
+            "stream": False,
+        }
+
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
         try:
-            system_message, messages = pop_system_message(messages)
-
-            # Use the fixed system prompt regardless of input
-            introduction = (
-                "Hello! I'm your 5G mobile billing assistant. How can I assist you with your billing concerns today?"
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload
             )
-
-            # If it's the start of the conversation, respond with the intro
-            if not messages or (len(messages) == 1 and messages[0]["role"] == "user"):
-                return {
-                    "id": "chatcmpl-billing-001",
-                    "object": "chat.completion",
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": introduction
-                        }
-                    }],
-                    "usage": {
-                        "prompt_tokens": 10,
-                        "completion_tokens": 10,
-                        "total_tokens": 20
-                    }
-                }
-
-            # Otherwise, simulate a billing assistant response (mock logic)
-            last_user_msg = messages[-1]["content"]
-            response = f"I understand. Let me check on the issue regarding: \"{last_user_msg}\". Could you please confirm your billing account number?"
+            response.raise_for_status()
+            result = response.json()
+            reply = result['content'][0]['text']
 
             return {
-                "id": "chatcmpl-billing-002",
+                "id": "chatcmpl-claude-5g-001",
                 "object": "chat.completion",
                 "choices": [{
                     "message": {
                         "role": "assistant",
-                        "content": response
+                        "content": reply
                     }
                 }],
                 "usage": {
@@ -107,4 +115,5 @@ class Pipeline:
             }
 
         except Exception as e:
-            return f"Error: {e}"
+            logging.exception("Error calling Claude API")
+            return {"error": str(e)}
